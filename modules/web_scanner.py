@@ -1,57 +1,62 @@
+#!/usr/bin/env python3
+"""Web Vulnerability Scanner - XSS, SQLi, Header checks"""
 import requests
 from bs4 import BeautifulSoup
-from colorama import Fore, Style
-
-COMMON_PATHS = [
-    "/admin", "/login", "/wp-admin", "/phpmyadmin",
-    "/.env", "/config.php", "/backup.zip", "/robots.txt",
-    "/api/v1", "/.git/config", "/server-status"
-]
 
 class WebScanner:
     def __init__(self, target_url):
         self.target = target_url
-        self.findings = []
-        self.headers = {"User-Agent": "VulnScanner/1.0 Security-Research"}
+        self.session = requests.Session()
+        self.session.headers["User-Agent"] = "Mozilla/5.0 (Security Scanner)"
+        self.vulnerabilities = []
 
-    def check_headers(self, response):
-        missing = []
-        security_headers = [
-            "X-Frame-Options", "X-XSS-Protection",
-            "Content-Security-Policy", "Strict-Transport-Security",
-            "X-Content-Type-Options"
-        ]
-        for h in security_headers:
-            if h not in response.headers:
-                missing.append(h)
-                print(f"{Fore.YELLOW}[!] Missing header: {h}{Style.RESET_ALL}")
-        return missing
-
-    def check_paths(self):
-        exposed = []
-        for path in COMMON_PATHS:
+    def _test_sqli(self, url, param):
+        payloads = ["'", "1 OR 1=1", "\" OR \"1\"=\"1"]
+        for payload in payloads:
             try:
-                r = requests.get(self.target + path, headers=self.headers, timeout=3, allow_redirects=False)
-                if r.status_code in [200, 301, 302]:
-                    exposed.append({"path": path, "status": r.status_code})
-                    print(f"{Fore.RED}[!] Exposed path: {path} ({r.status_code}){Style.RESET_ALL}")
+                r = self.session.get(url, params={param: payload}, timeout=5)
+                errors = ["sql syntax", "mysql_fetch", "ORA-", "sqlite", "syntax error"]
+                for err in errors:
+                    if err.lower() in r.text.lower():
+                        self.vulnerabilities.append({"type": "SQLi", "url": url, "param": param, "payload": payload})
+                        print(f"[!] SQLi found: {url}?{param}={payload}")
+                        return
             except:
                 pass
-        return exposed
+
+    def _test_xss(self, url, param):
+        payload = '<script>alert("XSS")</script>'
+        try:
+            r = self.session.get(url, params={param: payload}, timeout=5)
+            if payload in r.text:
+                self.vulnerabilities.append({"type": "XSS", "url": url, "param": param})
+                print(f"[!] XSS found: {url}?{param}")
+        except:
+            pass
+
+    def _check_headers(self):
+        try:
+            r = self.session.get(self.target, timeout=5)
+            security_headers = ["X-Frame-Options", "X-XSS-Protection", "Content-Security-Policy", "Strict-Transport-Security"]
+            for h in security_headers:
+                if h not in r.headers:
+                    self.vulnerabilities.append({"type": "Missing Header", "header": h})
+                    print(f"[!] Missing security header: {h}")
+        except:
+            pass
 
     def scan(self):
-        print(f"[*] Scanning web target: {self.target}")
+        print(f"[*] Web scanning: {self.target}")
+        self._check_headers()
         try:
-            r = requests.get(self.target, headers=self.headers, timeout=5)
-            missing_headers = self.check_headers(r)
-            exposed_paths = self.check_paths()
-            return {
-                "status_code": r.status_code,
-                "missing_headers": missing_headers,
-                "exposed_paths": exposed_paths,
-                "server": r.headers.get("Server", "unknown")
-            }
+            r = self.session.get(self.target, timeout=10)
+            soup = BeautifulSoup(r.text, "html.parser")
+            for form in soup.find_all("form"):
+                for inp in form.find_all("input"):
+                    name = inp.get("name", "")
+                    if name:
+                        self._test_sqli(self.target, name)
+                        self._test_xss(self.target, name)
         except Exception as e:
-            print(f"[-] Web scan failed: {e}")
-            return {}
-
+            print(f"[-] Error: {e}")
+        return self.vulnerabilities

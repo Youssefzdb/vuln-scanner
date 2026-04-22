@@ -1,44 +1,50 @@
+#!/usr/bin/env python3
+"""Port Scanner Module"""
 import socket
 import threading
-from colorama import Fore, Style
+from queue import Queue
 
 class PortScanner:
-    def __init__(self, target, port_range="1-1024"):
+    def __init__(self, target, port_range="1-1024", threads=100):
         self.target = target
-        self.start, self.end = map(int, port_range.split("-"))
+        self.threads = threads
         self.open_ports = []
-        self.lock = threading.Lock()
+        self.queue = Queue()
+        start, end = map(int, port_range.split("-"))
+        self.ports = range(start, end + 1)
 
     def _scan_port(self, port):
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(1)
-            result = s.connect_ex((self.target, port))
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((self.target, port))
             if result == 0:
                 try:
-                    service = socket.getservbyport(port)
+                    banner = sock.recv(1024).decode(errors="ignore").strip()
                 except:
-                    service = "unknown"
-                with self.lock:
-                    self.open_ports.append({"port": port, "service": service, "state": "open"})
-                    print(f"{Fore.GREEN}[+] Port {port}/tcp open ({service}){Style.RESET_ALL}")
-            s.close()
-        except Exception:
+                    banner = ""
+                self.open_ports.append({"port": port, "banner": banner})
+                print(f"[+] Port {port} OPEN {banner}")
+            sock.close()
+        except:
             pass
 
+    def _worker(self):
+        while not self.queue.empty():
+            port = self.queue.get()
+            self._scan_port(port)
+            self.queue.task_done()
+
     def scan(self):
-        print(f"[*] Scanning ports {self.start}-{self.end} on {self.target}...")
+        print(f"[*] Scanning ports on {self.target}...")
+        for port in self.ports:
+            self.queue.put(port)
         threads = []
-        for port in range(self.start, self.end + 1):
-            t = threading.Thread(target=self._scan_port, args=(port,))
-            threads.append(t)
+        for _ in range(self.threads):
+            t = threading.Thread(target=self._worker)
+            t.daemon = True
             t.start()
-            if len(threads) >= 100:
-                for t in threads:
-                    t.join()
-                threads = []
-        for t in threads:
-            t.join()
+            threads.append(t)
+        self.queue.join()
         print(f"[+] Found {len(self.open_ports)} open ports")
         return self.open_ports
-
